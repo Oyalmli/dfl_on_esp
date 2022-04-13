@@ -1,0 +1,3 @@
+[submodule "main/lib/data_validation_framework"]
+	path = main/lib/data_validation_framework
+	url = git@github.com:Oyalmli/data_validation_framework.git
