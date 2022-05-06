@@ -1,3 +1,0 @@
-[submodule "dvfw"]
-	path = main/lib/dvfw
-	url = git@github.com:Oyalmli/data_validation_framework.git
