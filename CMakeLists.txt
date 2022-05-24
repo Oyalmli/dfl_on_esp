@@ -3,4 +3,4 @@
 cmake_minimum_required(VERSION 3.5)
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
-project(dvfw_on_esp)
+project(dfl_on_esp)
