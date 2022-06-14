@@ -1,0 +1,257 @@
+#include <iostream>
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "esp_system.h"
+#include "driver/adc.h"
+#include "benchmark.hpp"
+
+template <typename T>
+class sum_dno : public pipeline_base<sum_dno<T>> {
+   public:
+    template<typename V>
+    void onReceive(V&& value) {
+        T temp; 
+        DoNotOptimize(temp = _acc + value);
+        _acc = temp;
+    }
+    sum_dno(T& val) : _acc(val) {}
+
+   private:
+    T& _acc;
+};
+
+template <typename T>
+class mod_sum_dno : public pipeline_base<mod_sum_dno<T>> {
+   public:
+    template<typename V>
+    void onReceive(V&& value) {
+        T temp; 
+        DoNotOptimize(temp = (value%13));
+        _acc += temp;
+    }
+    mod_sum_dno(T& val) : _acc(val) {}
+
+   private:
+    T& _acc;
+};
+
+extern "C" void app_main(void) {
+    std::chrono::seconds iters = std::chrono::seconds(2);
+    volatile int64_t VAR_ITERS = 1000000LL;
+
+  benchmark CONST_RANGE_SUM_MOD_DNO("CONST_RANGE_SUM_MOD_DNO", iters, []() {
+    int64_t sum = 0;
+    auto range_gen = gen::range(1000000LL);
+    range_gen >>= mod_sum_dno(sum);
+    assert(sum == 5999994);
+  });
+  CONST_RANGE_SUM_MOD_DNO.run();
+
+    benchmark VAR_RANGE_SUM_MOD_DNO("VAR_RANGE_SUM_MOD_DNO", iters, [=]() {
+    int64_t sum = 0;
+    auto range_gen = gen::range(VAR_ITERS);
+    range_gen >>= mod_sum_dno(sum);
+    assert(sum == 5999994);
+  });
+  VAR_RANGE_SUM_MOD_DNO.run();
+
+  benchmark CONST_RANGE_SUM_MOD("CONST_RANGE_SUM_MOD", iters, []() {
+    int64_t sum = 0;
+    auto range_gen = gen::range(1000000LL);
+    range_gen 
+    >>= pipe::transform([](auto i){ return i%13; })
+    >>= sink::sum(sum);
+    assert(sum == 5999994);
+  });
+  CONST_RANGE_SUM_MOD.run();
+
+  benchmark VAR_RANGE_SUM_MOD("VAR_RANGE_SUM_MOD", iters, [=]() {
+    int64_t sum = 0;
+    auto range_gen = gen::range(VAR_ITERS);
+    range_gen 
+    >>= pipe::transform([](auto i){ return i%13; })
+    >>= sink::sum(sum);
+    assert(sum == 5999994);
+  });
+  VAR_RANGE_SUM_MOD.run();
+
+    std::cout << '\n';
+
+  benchmark CONST_LOOP_SUM_MOD_DNO("CONST_LOOP_SUM_MOD_DNO", iters, [=]() {
+    int64_t sum = 0;
+    for (int64_t i = 0; i < 1000000LL; ++i) {
+        int64_t temp;
+        DoNotOptimize(temp = (i%13));
+        sum += temp;
+    }
+    assert(sum == 5999994);
+  });
+  CONST_LOOP_SUM_MOD_DNO.run();
+
+    benchmark VAR_LOOP_SUM_MOD_DNO("VAR_LOOP_SUM_MOD_DNO", iters, [=]() {
+    int64_t sum = 0;
+    for (int64_t i = 0; i < VAR_ITERS; ++i) {
+        int64_t temp;
+        DoNotOptimize(temp = (i%13));
+        sum += temp;
+    }
+    assert(sum == 5999994);
+  });
+  VAR_LOOP_SUM_MOD_DNO.run();
+
+ benchmark CONST_LOOP_SUM_MOD("CONST_LOOP_SUM_MOD", iters, [=]() {
+    int64_t sum = 0;
+    for (int64_t i = 0; i < 1000000LL; ++i) {
+        int64_t temp;
+        temp = (i%13);
+        sum += temp;
+    }
+    assert(sum == 5999994);
+  });
+  CONST_LOOP_SUM_MOD.run();
+
+  
+
+  benchmark VAR_LOOP_SUM_MOD("VAR_LOOP_SUM_MOD", iters, [=]() {
+    int64_t sum = 0;
+    for (int64_t i = 0; i < VAR_ITERS; ++i) {
+        int64_t temp;
+        temp = (i%13);
+        sum += temp;
+    }
+    assert(sum == 5999994);
+  });
+  VAR_LOOP_SUM_MOD.run();
+
+std::cout << '\n';
+
+  benchmark CONST_RANGE_SUM_DNO("CONST_RANGE_SUM_DNO", iters, [=]() {
+    int64_t sum = 0;
+    auto range_gen = gen::range(1000000LL);
+    auto sum_range = sum_dno(sum);
+    range_gen >>= sum_range;
+    assert(sum == 499999500000LL);
+  });
+  CONST_RANGE_SUM_DNO.run();
+
+  benchmark VAR_RANGE_SUM_DNO("VAR_RANGE_SUM_DNO", iters, [=]() {
+    int64_t sum = 0;
+    auto range_gen = gen::range(VAR_ITERS);
+    auto sum_range = sum_dno(sum);
+    range_gen >>= sum_range;
+    assert(sum == 499999500000LL);
+  });
+  VAR_RANGE_SUM_DNO.run();
+
+  benchmark CONST_RANGE_SUM("CONST_RANGE_SUM", iters, [=]() {
+    int64_t sum = 0;
+    auto range_gen = gen::range(1000000LL);
+    auto sum_range = sink::sum(sum);
+    range_gen >>= sum_range;
+    assert(sum == 499999500000LL);
+  });
+  CONST_RANGE_SUM.run();
+
+  
+
+  benchmark VAR_RANGE_SUM("VAR_RANGE_SUM", iters, [=]() {
+    int64_t sum = 0;
+    auto range_gen = gen::range(VAR_ITERS);
+    auto sum_range = sink::sum(sum);
+    range_gen >>= sum_range;
+    assert(sum == 499999500000LL);
+  });
+  VAR_RANGE_SUM.run();
+
+std::cout << '\n';
+
+  benchmark CONST_RANGE_ACCUMULATE_DNO("CONST_RANGE_ACCUMULATE_DNO", iters, [=]() {
+    auto range_gen = gen::range(1000000LL);
+    int64_t sum = std::accumulate(range_gen.begin(), range_gen.end(), 0LL, [](auto acc, auto curr){
+        DoNotOptimize(acc = acc+curr);
+        return acc;
+    });
+    assert(sum == 499999500000LL);
+  });
+  CONST_RANGE_ACCUMULATE_DNO.run();
+
+  benchmark VAR_RANGE_ACCUMULATE_DNO("VAR_RANGE_ACCUMULATE_DNO", iters, [=]() {
+    auto range_gen = gen::range(VAR_ITERS);
+    int64_t sum = std::accumulate(range_gen.begin(), range_gen.end(), 0LL, [](auto acc, auto curr){
+        DoNotOptimize(acc = acc+curr);
+        return acc;
+    });
+    assert(sum == 499999500000LL);
+  });
+  VAR_RANGE_ACCUMULATE_DNO.run();
+
+  benchmark CONST_RANGE_ACCUMULATE("CONST_RANGE_ACCUMULATE", iters, [=]() {
+    auto range_gen = gen::range(1000000LL);
+    int64_t sum = std::accumulate(range_gen.begin(), range_gen.end(), 0LL, [](auto acc, auto curr){
+        return acc+curr;
+    });
+    assert(sum == 499999500000LL);
+  });
+  CONST_RANGE_ACCUMULATE.run();
+
+  
+
+  benchmark VAR_RANGE_ACCUMULATE("VAR_RANGE_ACCUMULATE", iters, [=]() {
+    auto range_gen = gen::range(VAR_ITERS);
+    int64_t sum = std::accumulate(range_gen.begin(), range_gen.end(), 0LL, [](auto acc, auto curr){
+        return acc+curr;
+    });
+    assert(sum == 499999500000LL);
+  });
+  VAR_RANGE_ACCUMULATE.run();
+
+std::cout << '\n';
+
+  benchmark CONST_LOOP_DNO("CONST_LOOP_DNO", iters, [=]() {
+    int64_t sum = 0;
+    for (int64_t i = 0; i < 1000000LL; ++i) {
+        DoNotOptimize(sum += i);
+    }
+    assert(sum == 499999500000LL);
+  });
+  CONST_LOOP_DNO.run();
+
+  benchmark VAR_LOOP_DNO("VAR_LOOP_DNO", iters, [=]() {
+    int64_t sum = 0;
+    for (int64_t i = 0; i < VAR_ITERS; ++i) {
+        DoNotOptimize(sum += i);
+    }
+    assert(sum == 499999500000LL);
+  });
+  VAR_LOOP_DNO.run();
+
+  benchmark CONST_LOOP("CONST_LOOP", iters, [=]() {
+    int64_t sum = 0;
+    for (int64_t i = 0; i < 1000000LL; ++i) {
+        sum += i;
+    }
+    assert(sum == 499999500000LL);
+  });
+  CONST_LOOP.run();
+
+  
+
+  benchmark VAR_LOOP("VAR_LOOP", iters, [=]() {
+    int64_t sum = 0;
+    for (int64_t i = 0; i < VAR_ITERS; ++i) {
+        sum += i;
+    }
+    assert(sum == 499999500000LL);
+  });
+  VAR_LOOP.run();
+}
+
+/*
+                      DNO     |     OPTIM
+              | CONST | VAR   | CONST | VAR
+RANGE MOD SUM | 763    756      756     713
+LOOP MOD SUM  | 713    713      713     713
+RANGE SUM     | 119    119      0       113
+RANGE ACCUM   | 119    119      0       113
+LOOP SUM      | 131    169      0       0
+*/

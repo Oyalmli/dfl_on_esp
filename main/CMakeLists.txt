@@ -1,5 +1,6 @@
 idf_component_register(SRCS "main.cpp"
-                    INCLUDE_DIRS ".")
+                    INCLUDE_DIRS "."
+                    EMBED_TXTFILES "data_inp.txt")
 
 cmake_minimum_required(VERSION 3.5)
 

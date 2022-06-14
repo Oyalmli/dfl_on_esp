@@ -1,0 +1,385 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <sys/unistd.h>
+
+#include <chrono>
+#include <fstream>
+#include <iostream>
+
+#include "esp_err.h"
+#include "esp_log.h"
+#include "esp_vfs_fat.h"
+
+#include "dfl/dfl.hpp"
+#include "benchmark.hpp"
+using namespace dfl;
+
+static const char *TAG = "example";
+
+template <typename T>
+class sum_pipeline : public pipeline_base<sum_pipeline<T>> {
+   public:
+    template<typename V>
+    void onReceive(V&& value) {
+        _acc += value;
+    }
+
+    explicit sum_pipeline(T val) : _acc(val) {}
+
+   private:
+    T _acc;
+};
+
+/**
+ * Pipe component for running a function for each element of a pipeline
+ * @param function
+ * @return itself
+*/
+template <typename T>
+sum_pipeline<T> sum_o(T&& val) {
+    return sum_pipeline<T>{val};
+}
+
+
+// Handle of the wear levelling library instance
+static wl_handle_t s_wl_handle = WL_INVALID_HANDLE;
+
+// Mount path for the partition
+const char *base_path = "/spiflash";
+
+
+template <typename T>
+class file_fstream_gen : public gen::base_generator<file_fstream_gen<T>, T> {
+  std::fstream _stream;
+  T _curr;
+  bool _more;
+
+ public:
+  file_fstream_gen(const char* path) : _stream{path} { 
+      _stream >> _curr;
+    }
+  IT(file_fstream_gen<T>, T);
+  bool hasNext() { return _more; }
+  T next() {
+    _stream >> _curr;
+    _more = (_curr != 0);
+    return _curr;
+  }
+  T curr() { return _curr; }
+
+  void close() {
+      _stream.close();
+  }
+};
+
+class file_fscanf_gen : public gen::base_generator<file_fscanf_gen, int64_t> {
+  FILE* _fp;
+  int64_t _curr;
+  bool _more = true;
+
+ public:
+  file_fscanf_gen(FILE* fp) : _fp{fp} {
+    fscanf(_fp, "%lld", &_curr);
+  }
+  IT(file_fscanf_gen, int64_t);
+  bool hasNext() { return _more; }
+  int64_t next() {
+    fscanf(_fp, "%lld", &_curr);
+    _more = _curr != 0;
+    return _curr;
+  }
+  int64_t curr() { return _curr; }
+};
+
+int const_val() { return 42; }
+int random_val() { return rand(); }
+
+class sensor_gen
+    : public gen::base_generator<sensor_gen, decltype(const_val())> {
+  using T = decltype(const_val());
+  T _curr;
+
+ public:
+  sensor_gen() { _curr = const_val(); }
+  IT(sensor_gen, T);
+  bool hasNext() { return true; }
+  T curr() { return _curr; }
+  T next() {
+    _curr = const_val();
+    return _curr;
+  }
+};
+
+class random_gen
+    : public gen::base_generator<random_gen, decltype(random_val())> {
+  using T = decltype(random_val());
+
+ private:
+  T _curr;
+
+ public:
+  random_gen() { _curr = random_val(); }
+  IT(random_gen, T);
+  bool hasNext() { return true; }
+  T curr() { return _curr; }
+  T next() { _curr = random_val(); return _curr; }
+};
+
+extern "C" void app_main(void) {
+  // Do example setup
+  ESP_LOGI(TAG, "Setting up...");
+  esp_vfs_fat_mount_config_t mount_config;
+  mount_config.max_files = 4;
+  mount_config.format_if_mount_failed = true;
+  mount_config.allocation_unit_size = CONFIG_WL_SECTOR_SIZE;
+
+  esp_err_t err = esp_vfs_fat_spiflash_mount(base_path, "storage",
+                                             &mount_config, &s_wl_handle);
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "Failed to mount FATFS (%s)", esp_err_to_name(err));
+    return;
+  }
+
+  ESP_LOGI(TAG, "Copying nums.txt to filesystem...");
+  extern const char data_start[] asm("_binary_nums_txt_start");
+  extern const char data_end[] asm("_binary_nums_txt_end");
+  FILE *f = fopen("/spiflash/nums.txt", "wb");
+
+  if (f == NULL) {
+    ESP_LOGE(TAG, "Failed to open file for writing");
+    return;
+  }
+  fwrite(data_start, sizeof(char), data_end - data_start + 1, f);
+  fclose(f);
+  ESP_LOGI(TAG, "Finished writing to file");
+
+  //FILE *fptr = fopen("/spiflash/nums.txt", "r");
+  // BENCHMARKS //
+  std::chrono::seconds iters = std::chrono::seconds(2);
+  volatile int64_t VAR_ITERS = 100000LL;
+  std::cout << "[RUNTIME:" << iters.count() << "s] ALL TIME IS IN MS\n";
+  {
+  benchmark GENERATOR_File_read("GENERATOR_File_read", iters, [](){
+    FILE* fp = fopen("/spiflash/nums.txt", "r");
+    int64_t sum = 0;
+    auto inp_gen = gen::file<int64_t>(fp);
+    inp_gen >>= sum_o(sum);
+    assert(sum == 8094028LL);
+    fclose(fp);
+  });
+    GENERATOR_File_read.run();
+    }
+  
+  {
+  benchmark GENERATOR_fscanf_File_read("GENERATOR_fscanf_File_read", iters, [](){
+    int64_t sum = 0;
+    FILE* fp = fopen("/spiflash/nums.txt", "r");
+    auto inp_gen = file_fscanf_gen(fp);
+    inp_gen >>= sum_o(sum);
+    assert(sum == 8094028LL);
+    fclose(fp);
+  });
+  GENERATOR_fscanf_File_read.run();
+    }
+
+
+    /////////////////////////
+    //        LOOPS        //
+    /////////////////////////
+    {
+  benchmark LOOP_File_read("LOOP_File_read", iters, [](){
+    FILE* fp = fopen("/spiflash/nums.txt", "r");
+    int64_t sum = 0;
+    Reader<128> reader(fp);
+    while (reader.hasNext()) {
+      sum += reader.next<int64_t>();
+    }
+    assert(sum == 8094028LL);
+    fclose(fp);
+  });
+  LOOP_File_read.run();
+    }
+
+   {
+  benchmark LOOP_fscanf_File_read("LOOP_fscanf_File_read", iters, [](){
+    FILE* fp = fopen("/spiflash/nums.txt", "r");
+    int64_t sum = 0, temp = -1;
+    while (temp != 0) {
+      fscanf(fp, "%lld", &temp);
+      sum += temp;
+    }
+    assert(sum == 8094028LL);
+    fclose(fp);
+  });
+  LOOP_fscanf_File_read.run();
+   }
+   
+
+    /////////////////////////
+    //     FUNCTION GEN    //
+    /////////////////////////
+
+{
+    benchmark CONST_GENERATOR_setvalue("CONST_GENERATOR_setvalue", iters, [](){
+        auto val = 0;
+        auto s_gen = mod::take(100000LL, sensor_gen());
+        auto pipeline = sink::for_each([&](auto i) { val = i; });
+        s_gen >>= pipeline;
+        assert(val == 42);
+  });
+  CONST_GENERATOR_setvalue.run();
+}
+
+{
+  benchmark VAR_GENERATOR_setvalue("VAR_GENERATOR_setvalue", iters, [=](){
+        auto val = 0;
+        auto s_gen = mod::take(VAR_ITERS, sensor_gen());
+        auto pipeline = sink::for_each([&](auto i) { val = i; });
+        s_gen >>= pipeline;
+        assert(val == 42);
+  });
+  VAR_GENERATOR_setvalue.run();
+}
+
+{
+    benchmark CONST_LOOP_setvalue("CONST_LOOP_setvalue", iters, [](){
+    auto val = 0;
+    for (auto i = 0; i < 100000LL; ++i) {
+      val = const_val();
+    }
+    assert(val == 42);
+  });
+  CONST_LOOP_setvalue.run();
+}
+{
+  benchmark VAR_LOOP_setvalue("VAR_LOOP_setvalue", iters, [=](){
+    auto val = 0;
+    for (auto i = 0; i < VAR_ITERS; ++i) {
+      val = const_val();
+    }
+    assert(val == 42);
+  });
+  VAR_LOOP_setvalue.run();
+}
+{
+  benchmark CONST_GENERATOR_randomvalue("CONST_GENERATOR_randomvalue", iters, [=](){
+    auto val = 0;
+    auto s_gen = mod::take(100000LL, random_gen());
+    auto pipeline = sink::for_each([&](auto i) { val = i; });
+    s_gen >>= pipeline;
+    assert(val != 0);
+  });
+  CONST_GENERATOR_randomvalue.run();
+}
+{
+  benchmark VAR_GENERATOR_randomvalue("VAR_GENERATOR_randomvalue", iters, [=](){
+    auto val = 0;
+    auto s_gen = mod::take(VAR_ITERS, random_gen());
+    auto pipeline = sink::for_each([&](auto i) { val = i; });
+    s_gen >>= pipeline;
+    assert(val != 0);
+  });
+  VAR_GENERATOR_randomvalue.run();
+
+}
+{
+  benchmark CONST_LOOP_randomvalue("CONST_LOOP_randomvalue", iters, [](){
+    auto val = 0;
+    for (auto i = 0; i < 100000LL; ++i) {
+      val = random_val();
+    }
+    assert(val != 0);
+  });
+  CONST_LOOP_randomvalue.run();
+}
+{
+  benchmark VAR_LOOP_randomvalue("VAR_LOOP_randomvalue", iters, [=](){
+    auto val = 0;
+    for (auto i = 0; i < VAR_ITERS; ++i) {
+      val = random_val();
+    }
+    assert(val != 0);
+  });
+  VAR_LOOP_randomvalue.run();
+
+}
+{
+  benchmark CONST_GENERATOR_many_ops("CONST_GENERATOR_many_ops", iters, [](){
+    int64_t acc = 0, sum = 0;
+    auto range_gen = gen::range(100000LL);
+
+    auto transform_pipeline 
+    =  pipe::transform([](auto i) { return i % 13; }) 
+    >>= pipe::set_state([](auto i, auto& _state) { _state = i + (_state % 9); }, acc) 
+    >>= pipe::transform_s([](auto i, auto& _state) { return i + _state; }, acc);
+
+    auto pipeline 
+    =   transform_pipeline 
+    >>= pipe::partition([](auto i) { return (i % 13) == 0; },
+          pipe::transform([](auto i) { return i + 13; }) >>= sum_o(sum),
+          sink::hole()
+        );
+    range_gen >>= pipeline;
+    assert(sum == 233337);
+  });
+  CONST_GENERATOR_many_ops.run();
+
+}
+{
+  benchmark VAR_GENERATOR_many_ops("VAR_GENERATOR_many_ops", iters, [=](){
+    int64_t acc = 0, sum = 0;
+    auto range_gen = gen::range(VAR_ITERS);
+
+    auto transform_pipeline 
+    =  pipe::transform([](auto i) { return i % 13; }) 
+    >>= pipe::set_state([](auto i, auto& _state) { _state = i + (_state % 9); }, acc) 
+    >>= pipe::transform_s([](auto i, auto& _state) { return i + _state; }, acc);
+
+    auto pipeline 
+    =   transform_pipeline 
+    >>= pipe::partition([](auto i) { return (i % 13) == 0; },
+          pipe::transform([](auto i) { return i + 13; }) >>= sum_o(sum),
+          sink::hole()
+        );
+    range_gen >>= pipeline;
+    assert(sum == 233337);
+  });
+  VAR_GENERATOR_many_ops.run();
+
+}
+{
+  benchmark CONST_LOOP_many_ops("CONST_LOOP_many_ops", iters, [](){
+    int64_t acc = 0, sum = 0;
+    for (int64_t i = 0; i < 100000LL; ++i) {
+      int64_t x = (i % 13);
+      acc = x + (acc % 9);
+      x += acc;
+      if ((x % 13) == 0) {
+        x += 13;
+        sum += x;
+      }
+    }
+    assert(sum == 233337);
+  });
+  CONST_LOOP_many_ops.run();
+
+}
+{
+  benchmark VAR_LOOP_many_ops("VAR_LOOP_many_ops", iters, [=](){
+    int64_t acc = 0, sum = 0;
+    for (int64_t i = 0; i < VAR_ITERS; ++i) {
+      int64_t x = (i % 13);
+      acc = x + (acc % 9);
+      x += acc;
+      if ((x % 13) == 0) {
+        x += 13;
+        sum += x;
+      }
+    }
+    assert(sum == 233337);
+  });
+  VAR_LOOP_many_ops.run();
+}
+}

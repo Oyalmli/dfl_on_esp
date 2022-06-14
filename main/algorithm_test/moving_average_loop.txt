@@ -1,0 +1,122 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <sys/unistd.h>
+
+#include <chrono>
+#include <fstream>
+#include <iostream>
+
+#include "esp_err.h"
+#include "esp_log.h"
+#include "esp_vfs_fat.h"
+
+#include "dfl/dfl.hpp"
+#include "benchmarks/benchmark.hpp"
+using namespace dfl;
+
+static const char *TAG = "example";
+static wl_handle_t s_wl_handle = WL_INVALID_HANDLE;
+const char *base_path = "/spiflash";
+
+template<typename T, size_t N>
+class Moving_avg {
+    public:
+    Moving_avg(double delta, size_t skippable) : _total{0}, _delta{delta}, _skippable{skippable} {}
+
+    T update(T sample) {
+        return get_avg(sample);
+    }
+
+ private:
+  T _samples[N];
+  size_t _num_samples{0};
+  T _total;
+  double _delta;
+  size_t _skipped{0};
+  size_t _skippable;
+    T diff(T a, T b) { return a > b ? a - b : b - a; }
+
+  float get_avg(T sample) {
+    T avg = _total / static_cast<double>(std::min(_num_samples, N));
+    if (diff(sample, avg) > _delta && _skipped < _skippable) {
+      _skipped++;
+      return avg;
+    }
+    _skipped = 0;
+    _total += sample;
+    if (_num_samples < N)
+      _samples[_num_samples++] = sample;
+    else {
+      T& oldest = _samples[_num_samples++ % N];
+      _total -= oldest;
+      oldest = sample;
+    }
+    return _total / static_cast<double>(std::min(_num_samples, N));
+  }
+};
+bool write_file(const char* path) {
+    ESP_LOGI(TAG, "Setting up...");
+    esp_vfs_fat_mount_config_t mount_config;
+    mount_config.max_files = 4;
+    mount_config.format_if_mount_failed = true;
+    mount_config.allocation_unit_size = CONFIG_WL_SECTOR_SIZE;
+
+    esp_err_t err = esp_vfs_fat_spiflash_mount(base_path, "storage",
+                                                &mount_config, &s_wl_handle);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to mount FATFS (%s)", esp_err_to_name(err));
+        return false;
+    }
+
+    ESP_LOGI(TAG, "Copying file to filesystem...");
+    extern const char data_start[] asm("_binary_data_inp_txt_start");
+    extern const char data_end[] asm("_binary_data_inp_txt_end");
+    FILE *f = fopen(path, "wb");
+
+    if (f == NULL) {
+        ESP_LOGE(TAG, "Failed to open file for writing");
+        return false;
+    }
+    fwrite(data_start, sizeof(char), data_end - data_start + 1, f);
+    fclose(f);
+    ESP_LOGI(TAG, "Finished writing to file");
+    return true;
+}
+
+bool open_file(const char* path){
+    FILE* fp = fopen(path, "r");
+    if (fp == nullptr) return false;
+    return true;
+}
+
+extern "C" void app_main(void) {
+    if (!write_file("/spiflash/data_inp.txt")) return;
+    FILE* fp = fopen("/spiflash/data_inp.txt", "r");
+    if (fp == nullptr) {
+        ESP_LOGE(TAG, "Could not open file");
+    }
+
+    double moving_avg = 0;
+    double diff = 0;
+    double prev = 0;
+    auto start = std::chrono::high_resolution_clock::now();
+    Moving_avg<double, 5> ma(0.5, 1);
+    float sum = 0.0;
+    for (auto reading : gen::file<double>(fp)) {
+        moving_avg = ma.update(reading);
+        diff = prev > moving_avg 
+            ? prev - moving_avg
+            : moving_avg - prev;
+        prev = reading;
+        sum += (diff > 0.5 ? 1 : 0);
+        //printf("%d\n", (diff > 0.5 ? 1 : 0));
+    }
+    printf("sum: %f", sum);
+
+    auto stop = std::chrono::high_resolution_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::microseconds>(stop-start).count();
+    fclose(fp);
+    printf("Took: %lld\n", duration);
+}

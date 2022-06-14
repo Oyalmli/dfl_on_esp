@@ -1,0 +1,273 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <sys/unistd.h>
+
+#include <chrono>
+#include <fstream>
+#include <iostream>
+
+#include "esp_err.h"
+#include "esp_log.h"
+#include "esp_vfs_fat.h"
+
+#include "dfl/dfl.hpp"
+#include "benchmarks/benchmark.hpp"
+
+using namespace dfl;
+
+static const char *TAG = "example";
+
+template <typename T>
+class sum_pipeline : public pipeline_base<sum_pipeline<T>> {
+   public:
+    template<typename V>
+    void onReceive(V&& value) {
+        _acc += value;
+    }
+
+    explicit sum_pipeline(T val) : _acc(val) {}
+
+   private:
+    T _acc;
+};
+
+/**
+ * Pipe component for running a function for each element of a pipeline
+ * @param function
+ * @return itself
+*/
+template <typename T>
+sum_pipeline<T> sum_o(T&& val) {
+    return sum_pipeline<T>{val};
+}
+
+
+// Handle of the wear levelling library instance
+static wl_handle_t s_wl_handle = WL_INVALID_HANDLE;
+
+// Mount path for the partition
+const char *base_path = "/spiflash";
+
+
+template <typename T>
+class file_fstream_gen : public gen::base_generator<file_fstream_gen<T>, T> {
+  std::fstream _stream;
+  T _curr;
+  bool _more;
+
+ public:
+  file_fstream_gen(const char* path) : _stream{path} { 
+      _stream >> _curr;
+    }
+  IT(file_fstream_gen<T>, T);
+  bool hasNext() { return _more; }
+  T next() {
+    _stream >> _curr;
+    _more = (_curr != 0);
+    return _curr;
+  }
+  T curr() { return _curr; }
+
+  void close() {
+      _stream.close();
+  }
+};
+
+class file_fscanf_gen : public gen::base_generator<file_fscanf_gen, int64_t> {
+  FILE* _fp;
+  int64_t _curr;
+  bool _more = true;
+
+ public:
+  file_fscanf_gen(FILE* fp) : _fp{fp} {
+    fscanf(_fp, "%lld", &_curr);
+  }
+  IT(file_fscanf_gen, int64_t);
+  bool hasNext() { return _more; }
+  int64_t next() {
+    fscanf(_fp, "%lld", &_curr);
+    _more = _curr != 0;
+    return _curr;
+  }
+  int64_t curr() { return _curr; }
+};
+
+int const_val() { return 42; }
+int random_val() { return rand(); }
+
+class sensor_gen
+    : public gen::base_generator<sensor_gen, decltype(const_val())> {
+  using T = decltype(const_val());
+  T _curr;
+
+ public:
+  sensor_gen() { _curr = const_val(); }
+  IT(sensor_gen, T);
+  bool hasNext() { return true; }
+  T curr() { return _curr; }
+  T next() {
+    _curr = const_val();
+    return _curr;
+  }
+};
+
+class random_gen
+    : public gen::base_generator<random_gen, decltype(random_val())> {
+  using T = decltype(random_val());
+
+ private:
+  T _curr;
+
+ public:
+  random_gen() { _curr = random_val(); }
+  IT(random_gen, T);
+  bool hasNext() { return true; }
+  T curr() { return _curr; }
+  T next() { _curr = random_val(); return _curr; }
+};
+
+bool write_file(const char* path) {
+    ESP_LOGI(TAG, "Setting up...");
+    esp_vfs_fat_mount_config_t mount_config;
+    mount_config.max_files = 4;
+    mount_config.format_if_mount_failed = true;
+    mount_config.allocation_unit_size = CONFIG_WL_SECTOR_SIZE;
+
+    esp_err_t err = esp_vfs_fat_spiflash_mount(base_path, "storage",
+                                                &mount_config, &s_wl_handle);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to mount FATFS (%s)", esp_err_to_name(err));
+        return false;
+    }
+
+    ESP_LOGI(TAG, "Copying file to filesystem...");
+    extern const char data_start[] asm("_binary_data_inp_txt_start");
+    extern const char data_end[] asm("_binary_data_inp_txt_end");
+    FILE *f = fopen(path, "wb");
+
+    if (f == NULL) {
+        ESP_LOGE(TAG, "Failed to open file for writing");
+        return false;
+    }
+    fwrite(data_start, sizeof(char), data_end - data_start + 1, f);
+    fclose(f);
+    ESP_LOGI(TAG, "Finished writing to file");
+    return true;
+}
+
+bool open_file(const char* path){
+    FILE* fp = fopen(path, "r");
+    if (fp == nullptr) return false;
+    return true;
+}
+
+
+template <typename T, size_t N>
+class restricted_avg : public dfl_base {
+ public:
+  template <typename... Values, typename TailPipeline>
+  void onReceive(Values&&... values, TailPipeline&& tailPipeline) {
+    send(FWD(get_avg(values...)), tailPipeline);
+  }
+
+  /**
+   * @brief Returns a moving average of the last N values
+   * @return moving average {double}
+   */
+  explicit restricted_avg(double delta, size_t skippable)
+      : _total{0}, _delta{delta}, _skippable{skippable} {}
+
+ private:
+  T _samples[N];
+  size_t _num_samples{0};
+  T _total;
+  double _delta;
+  size_t _skipped{0};
+  size_t _skippable;
+
+  T diff(T a, T b) { return a > b ? a - b : b - a; }
+
+  float get_avg(T sample) {
+    T avg = _total / static_cast<double>(std::min(_num_samples, N));
+    if (diff(sample, avg) > _delta && _skipped < _skippable) {
+      _skipped++;
+      return avg;
+    }
+    _skipped = 0;
+    _total += sample;
+    if (_num_samples < N)
+      _samples[_num_samples++] = sample;
+    else {
+      T& oldest = _samples[_num_samples++ % N];
+      _total -= oldest;
+      oldest = sample;
+    }
+    return _total / static_cast<double>(std::min(_num_samples, N));
+  }
+};
+
+template <typename State>
+class set_state_pipe : public dfl_base {
+ public:
+  template <typename Value>
+  void onReceive(Value&& value) {
+    _state.diff = _state.prev > _state.moving_avg ? _state.prev - _state.moving_avg
+                                               : _state.moving_avg - _state.prev;
+    _state.prev = value;
+    
+  }
+
+  /**
+   * @brief Returns a moving average of the last N values
+   * @return moving average {double}
+   */
+  set_state_pipe(State state) : _state(state) {}
+
+ private:
+  State _state;
+};
+
+template <typename State>
+set_state_pipe<State> set_state(State&& state) {
+    return set_state_pipe<State>{state};
+}
+
+
+extern "C" void app_main(void) {
+    if (!write_file("/spiflash/data_inp.txt")) return;
+    FILE* fp = fopen("/spiflash/data_inp.txt", "r");
+    if (fp == nullptr) {
+        ESP_LOGE(TAG, "Could not open file");
+    }
+    struct State {
+    double moving_avg = 0;
+    double diff = 0;
+    double prev = 0;
+  } state;
+  auto start = std::chrono::high_resolution_clock::now();
+  auto file_gen = gen::file<double>(fp);
+
+  auto set_moving_avg 
+  =   restricted_avg<double, 5>(0.5, 1) 
+  >>= pipe::set_state([](auto f, State& state) { state.moving_avg = f; }, state) 
+  >>= sink::hole();
+    float sum = 0.0;
+
+  file_gen 
+  >>= pipe::tee(pipe::fork(
+    pipe::partition([](auto i){ return i < 14 || i > 40; },
+        sink::hole(),
+        set_moving_avg),
+    set_state(state) )) 
+  >>= pipe::transform_s([](auto f, State& state) { return state.diff > 0.5 ? 1 : 0; }, state)
+  >>= sink::sum(sum); //without print version
+  //>>= sink::printf("%d\n"); //with print version
+
+  printf("sum: %f\n", sum);
+  auto stop = std::chrono::high_resolution_clock::now();
+  auto duration = std::chrono::duration_cast<std::chrono::microseconds>(stop-start).count();
+  fclose(fp);
+  printf("Took: %lld\n", duration);
+}
