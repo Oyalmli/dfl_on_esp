@@ -5,6 +5,9 @@
 #include <chrono>
 #include "dfl/dfl.hpp"
 #include <numeric>
+#include "esp_err.h"
+#include "esp_log.h"
+#include "esp_vfs_fat.h"
 
 using namespace dfl;
 

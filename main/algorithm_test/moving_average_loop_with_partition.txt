@@ -106,15 +106,15 @@ extern "C" void app_main(void) {
     auto start = std::chrono::high_resolution_clock::now();
     Moving_avg<double, 5> ma(0.5, 1);
     for (auto reading : gen::file<double>(fp)) {
-        if (reading < 14 || reading > 30) {} else {
+        if (reading > 14 && reading < 30) {
             moving_avg = ma.update(reading);
         }
         diff = prev > moving_avg 
             ? prev - moving_avg
             : moving_avg - prev;
         prev = reading;
-        sum += (diff > 0.5 ? 1 : 0);
-        //printf("%d\n", (diff > 0.5 ? 1 : 0));
+        //sum += (diff > 0.5 ? 1 : 0);
+        printf("%d\n", (diff > 0.5 ? 1 : 0));
     }
     printf("sum: %f", sum);
     auto stop = std::chrono::high_resolution_clock::now();
