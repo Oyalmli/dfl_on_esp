@@ -105,8 +105,11 @@ extern "C" void app_main(void) {
     float sum = 0.0;
     auto start = std::chrono::high_resolution_clock::now();
     Moving_avg<double, 5> ma(0.5, 1);
+
+    auto reading_is_valid = [](auto reading) { return reading > 14 && reading < 30; };
+
     for (auto reading : gen::file<double>(fp)) {
-        if (reading > 14 && reading < 30) {
+        if (reading_is_valid(reading)) {
             moving_avg = ma.update(reading);
         }
         diff = prev > moving_avg 

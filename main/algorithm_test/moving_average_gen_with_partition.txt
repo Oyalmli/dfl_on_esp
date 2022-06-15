@@ -130,13 +130,18 @@ extern "C" void app_main(void) {
   auto file_gen = gen::file<double>(fp);
   float sum = 0.0;
 
+  auto reading_is_valid = [](auto reading) { return reading > 14 && reading < 30; };
+
+  auto set_moving_avg 
+  =   restricted_avg<double, 5>(0.5, 1)
+  >>= pipe::set_state([](auto f, State& state) { state.moving_avg = f; }, state) 
+  >>= sink::hole();
+
   file_gen 
   >>= pipe::tee(
     pipe::fork(
-        pipe::filter([](auto reading) { return reading > 14 && reading < 30; })
-        >>= restricted_avg<double, 5>(0.5, 1)
-        >>= pipe::set_state([](auto f, State& state) { state.moving_avg = f; }, state) 
-        >>= sink::hole(),
+        pipe::filter(reading_is_valid)
+        >>= set_moving_avg,
         set_state(state)
     )
   ) 
