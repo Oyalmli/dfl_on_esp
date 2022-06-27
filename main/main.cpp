@@ -6,34 +6,28 @@
 #include <iostream>
 #include "dfl/dfl.hpp"
 #include "InfInt.hpp"
+#include <iterator>
+#include <type_traits>
 
 using namespace dfl;
 
-class fibonacci : public gen::base_generator<fibonacci, InfInt> {
+class fibonacci : public gen::base_generator<InfInt> {
     InfInt _curr{0}, _next{1};
     public:
     fibonacci() {}
-    IT(fibonacci, InfInt);
-    InfInt curr() { return _curr; }
-    InfInt next() {
+    bool hasNext() const { return true; }
+    InfInt curr() const { return _curr; }
+    void next() {
         InfInt temp = _next;
         _next += _curr;
         _curr = temp;
-        return _curr;
     }
-    bool hasNext() {
-        return true;
-    }
+    
+    MAKE_ITER(fibonacci, InfInt);
 };
 
 extern "C" void app_main(void) {
-    std::string nums[] = {"█","▓","▒","░"," "};
-    auto fib_gen = fibonacci();
-    fib_gen >>= sink::for_each([&nums](auto num){
-        std::string curr;
-        for(char c : num.toString()){
-            curr.append(nums[((c-'0')/2)]);
-        }
-        std::cout << curr << '\n';
-    });
+    fibonacci() 
+    >>= pipe::intersperse("\n")
+    >>= sink::to_out_stream(std::cout);
 }
